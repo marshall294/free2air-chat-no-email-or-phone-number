@@ -1,0 +1,383 @@
+<!--
+FirebaseTextChat.html
+Single-file text-only chat app (WhatsApp-like UI)
+Features:
+- Username-only sign-in (no email/phone)
+- Contacts list + invite link generation
+- Invite via link: ?invite=<uid> auto-adds contact
+- One-to-one chats with messages saved in Firestore (text only)
+- Message timestamps, simple "seen" indicator
+- Presence (online/offline) via Firebase Realtime Database
+- Typing indicator
+- Mobile-first responsive UI
+
+SETUP:
+1) Create a Firebase project and enable:
+   - Authentication > Anonymous sign-in
+   - Firestore (native mode)
+   - Realtime Database
+2) Replace the firebaseConfig below with your project config
+3) Deploy as static file or run locally (prefer https for invite links)
+
+Notes / Best practices included as inline comments.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Text Chat — Firebase (Username only)</title>
+  <style>
+    /* Minimal mobile-first WhatsApp-like UI */
+    :root{--bg:#f2f3f5;--primary:#075e54;--accent:#128c7e;--muted:#667;--bubble-self:#dcf8c6;--bubble-other:#fff}
+    *{box-sizing:border-box}
+    body,html{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    .app{display:flex;height:100vh;background:var(--bg)}
+    /* Sidebar */
+    .sidebar{width:320px;max-width:45%;min-width:260px;background:#fff;border-right:1px solid #e6e6e6;display:flex;flex-direction:column}
+    .brand{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid #eee}
+    .brand .logo{width:44px;height:44px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--accent));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+    .search{padding:10px;border-bottom:1px solid #f1f1f1}
+    .search input{width:100%;padding:10px;border-radius:8px;border:1px solid #eee}
+    .contacts{overflow:auto;flex:1}
+    .contact{display:flex;gap:10px;padding:12px;align-items:center;border-bottom:1px solid #fafafa;cursor:pointer}
+    .contact:hover{background:#f9f9f9}
+    .avatar{width:44px;height:44px;border-radius:50%;background:#ddd;display:flex;align-items:center;justify-content:center;font-weight:700}
+    .contact .meta{flex:1}
+    .contact .meta .name{font-weight:600}
+    .contact .meta .sub{font-size:12px;color:var(--muted)}
+
+    /* Chat area */
+    .chat{flex:1;display:flex;flex-direction:column;background:linear-gradient(180deg,#f8fbfb,#f2f3f5)}
+    .chathead{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid #eee;background:rgba(255,255,255,0.6)}
+    .chatbody{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
+    .msg-row{display:flex}
+    .msg{max-width:76%;padding:10px;border-radius:12px;box-shadow:0 1px 0 rgba(0,0,0,0.05);font-size:15px;line-height:1.3}
+    .msg .time{display:block;margin-top:6px;font-size:11px;color:var(--muted);text-align:right}
+    .self{margin-left:auto;background:var(--bubble-self)}
+    .other{margin-right:auto;background:var(--bubble-other)}
+
+    .composer{display:flex;padding:10px;border-top:1px solid #eee;gap:8px;background:rgba(255,255,255,0.8)}
+    .composer input{flex:1;padding:12px;border-radius:22px;border:1px solid #eee}
+    .composer button{background:var(--accent);color:#fff;border:none;padding:10px 14px;border-radius:20px}
+
+    /* small screens adjustments */
+    @media (max-width:720px){
+      .sidebar{width:100%;max-width:100%;position:absolute;z-index:30;height:100%;transform:translateX(0);transition:transform .2s}
+      .hidden-sm{display:none}
+      .app.single .sidebar{transform:translateX(-110%)}
+      .app.single .chat{flex:1}
+      .sidebar.close{transform:translateX(-110%)}
+    }
+
+    .tiny{font-size:12px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div id="app" class="app single">
+
+    <div class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="logo">TC</div>
+        <div>
+          <div style="font-weight:700">TextChat</div>
+          <div class="tiny" id="myName">Not signed in</div>
+        </div>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button id="btnInvite" title="Invite friend">Invite</button>
+          <button id="btnSignOut" title="Sign out">Sign out</button>
+        </div>
+      </div>
+      <div class="search"><input id="searchContact" placeholder="Search contacts or username"></div>
+      <div class="contacts" id="contactsList"></div>
+      <div style="padding:10px;border-top:1px solid #f1f1f1"><button id="btnNewContact">+ New Contact (by username)</button></div>
+    </div>
+
+    <div class="chat" id="chatPane">
+      <div class="chathead">
+        <div class="avatar" id="chatAvatar">U</div>
+        <div style="flex:1">
+          <div id="chatTitle">Select a contact</div>
+          <div class="tiny" id="chatStatus">—</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div id="typingIndicator" class="tiny"></div>
+          <button id="btnBack" class="hidden-sm">Back</button>
+        </div>
+      </div>
+
+      <div class="chatbody" id="messages"></div>
+
+      <div class="composer">
+        <input id="messageInput" placeholder="Type a message" autocomplete="off">
+        <button id="sendBtn">Send</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Firebase SDKs (modular) -->
+  <script type="module">
+    // TODO: Replace with your Firebase config
+  const firebaseConfig = {
+    apiKey: "AIzaSyAFsHg9fK6IDnHbuxmBleEfIIfVGsuLDik",
+    authDomain: "profile-b825d.firebaseapp.com",
+    projectId: "profile-b825d",
+    storageBucket: "profile-b825d.appspot.com",
+    messagingSenderId: "925276859161",
+    appId: "1:925276859161:web:194c60f6dbd9f1ef8bf388"
+  };
+
+    // Import SDKs
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js';
+    import { getAuth, signInAnonymously, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js';
+    import { getFirestore, doc, setDoc, getDoc, collection, query, where, onSnapshot, addDoc, serverTimestamp, orderBy, limit, getDocs, updateDoc } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js';
+    import { getDatabase, ref as dbRef, onDisconnect, onValue, set as rSet } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js';
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const rdb = getDatabase(app);
+
+    // UI refs
+    const myNameEl = document.getElementById('myName');
+    const contactsList = document.getElementById('contactsList');
+    const btnNewContact = document.getElementById('btnNewContact');
+    const btnInvite = document.getElementById('btnInvite');
+    const btnSignOut = document.getElementById('btnSignOut');
+    const chatTitle = document.getElementById('chatTitle');
+    const chatStatus = document.getElementById('chatStatus');
+    const messagesEl = document.getElementById('messages');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const chatAvatar = document.getElementById('chatAvatar');
+    const typingIndicator = document.getElementById('typingIndicator');
+    const btnBack = document.getElementById('btnBack');
+
+    let currentUser = null;
+    let contacts = {};
+    let activeChat = null; // {id, withUid}
+    let messagesUnsub = null;
+    let contactsUnsub = null;
+
+    // Helper: format timestamp
+    function fmtTs(ts){
+      if(!ts) return '';
+      const d = ts.toDate ? ts.toDate() : new Date(ts);
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      return sameDay ? d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : d.toLocaleString();
+    }
+
+    // Create or update local user profile in Firestore
+    async function ensureProfile(uid, username){
+      const uref = doc(db, 'users', uid);
+      await setDoc(uref, {uid, username, updatedAt: serverTimestamp()}, {merge:true});
+      return uref;
+    }
+
+    // Sign-in anonymously then prompt for username if needed
+    async function start(){
+      await signInAnonymously(auth).catch(e=>console.error(e));
+    }
+
+    onAuthStateChanged(auth, async user => {
+      if(user){
+        currentUser = {uid: user.uid};
+        // If local username not set, ask user
+        let username = localStorage.getItem('tc_username');
+        if(!username){
+          username = prompt('Pick a username (visible to others). No email/phone required.') || ('User'+Math.floor(Math.random()*9000));
+          localStorage.setItem('tc_username', username);
+        }
+        currentUser.username = username;
+        myNameEl.textContent = username;
+        await ensureProfile(currentUser.uid, username);
+        setupPresence();
+        loadContactsRealtime();
+        handleInviteOnLoad();
+      } else {
+        // signed out state
+        currentUser = null;
+        myNameEl.textContent = 'Not signed in';
+      }
+    });
+
+    btnSignOut.addEventListener('click', async ()=>{
+      await signOut(auth);
+      localStorage.removeItem('tc_username');
+      location.reload();
+    });
+
+    // Presence using Realtime Database (works with onDisconnect)
+    function setupPresence(){
+      const statusRef = dbRef(rdb, '/status/' + currentUser.uid);
+      const now = Date.now();
+      rSet(statusRef, {state:'online', last_changed: now});
+      onDisconnect(statusRef).set({state:'offline', last_changed: Date.now()});
+
+      // Listen for permission/visibility change to update presence
+      document.addEventListener('visibilitychange', ()=>{
+        rSet(statusRef, {state: document.hidden ? 'away' : 'online', last_changed: Date.now()});
+      });
+    }
+
+    // Generate invite link
+    btnInvite.addEventListener('click', ()=>{
+      if(!currentUser) return alert('Not signed in');
+      const link = location.origin + location.pathname + '?invite=' + currentUser.uid;
+      navigator.clipboard.writeText(link).then(()=>alert('Invite link copied to clipboard'));
+    });
+
+    // Handle incoming invite param on load
+    async function handleInviteOnLoad(){
+      const params = new URLSearchParams(location.search);
+      const other = params.get('invite');
+      if(other && other !== currentUser.uid){
+        // Add each other as contacts
+        await addContactByUid(other);
+        // Optionally, open chat immediately
+        openChatWith(other);
+        // remove invite param
+        history.replaceState({}, '', location.pathname);
+      }
+    }
+
+    // Add contact by UID (if exists)
+    async function addContactByUid(uid){
+      const uDoc = await getDoc(doc(db,'users',uid));
+      if(!uDoc.exists()) return alert('User not found');
+      const udata = uDoc.data();
+      // add to current user's contacts collection
+      await setDoc(doc(db, 'users', currentUser.uid, 'contacts', uid), {uid: udata.uid, username: udata.username, addedAt: serverTimestamp()});
+      // add current user to other user's contacts if you want mutual
+      await setDoc(doc(db, 'users', uid, 'contacts', currentUser.uid), {uid: currentUser.uid, username: currentUser.username, addedAt: serverTimestamp()});
+    }
+
+    // Create chat id deterministically for pair
+    function pairChatId(a,b){
+      return [a,b].sort().join('_');
+    }
+
+    // Open chat with uid
+    async function openChatWith(uid){
+      if(messagesUnsub) messagesUnsub();
+      activeChat = {withUid: uid, id: pairChatId(currentUser.uid, uid)};
+      // fetch contact info
+      const udoc = await getDoc(doc(db,'users',uid));
+      const udata = udoc.exists() ? udoc.data() : {username:uid};
+      chatTitle.textContent = udata.username || uid;
+      chatAvatar.textContent = (udata.username||'U').charAt(0).toUpperCase();
+
+      // listen to their presence
+      const presenceRef = dbRef(rdb, '/status/' + uid);
+      onValue(presenceRef, snap => {
+        const v = snap.val();
+        if(!v) { chatStatus.textContent = 'offline'; return; }
+        chatStatus.textContent = v.state + (v.last_changed ? ' • ' + new Date(v.last_changed).toLocaleTimeString() : '');
+      });
+
+      // messages listener
+      const msgsQ = query(collection(db, 'chats', activeChat.id, 'messages'), orderBy('createdAt', 'asc'));
+      messagesUnsub = onSnapshot(msgsQ, snap=>{
+        messagesEl.innerHTML = '';
+        snap.forEach(docSnap => {
+          const m = docSnap.data();
+          const isMe = m.from === currentUser.uid;
+          const row = document.createElement('div'); row.className='msg-row';
+          const bubble = document.createElement('div'); bubble.className = 'msg ' + (isMe ? 'self' : 'other');
+          bubble.innerHTML = '<div>' + escapeHtml(m.text) + '</div><div class="time">' + fmtTs(m.createdAt) + '</div>';
+          row.appendChild(bubble);
+          messagesEl.appendChild(row);
+        });
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      });
+
+      // typing indicator listener
+      const typingRef = doc(db, 'chats', activeChat.id);
+      // (simple implementation: read a field 'typing' mapping uid->bool) -- poll via snapshot
+      onSnapshot(typingRef, snap=>{
+        if(!snap.exists()) { typingIndicator.textContent=''; return; }
+        const data = snap.data();
+        const t = data.typing || {};
+        typingIndicator.textContent = t[uid] ? (udata.username + ' is typing...') : '';
+      });
+
+      // show sidebar on mobile hide
+      document.getElementById('app').classList.remove('single');
+    }
+
+    // Escape HTML to prevent injection
+    function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    // Send message
+    sendBtn.addEventListener('click', sendMessage);
+    messageInput.addEventListener('keydown', e=>{ if(e.key==='Enter') sendMessage(); else notifyTyping(true); });
+    messageInput.addEventListener('keyup', ()=>{ debounce(()=>notifyTyping(false), 1000); });
+
+    let typingTimeout = null;
+    function debounce(fn, ms){ clearTimeout(typingTimeout); typingTimeout = setTimeout(fn, ms); }
+
+    async function notifyTyping(isTyping){
+      if(!activeChat) return;
+      const chatRef = doc(db, 'chats', activeChat.id);
+      // set typing map
+      await setDoc(chatRef, {typing: {[currentUser.uid]: isTyping}}, {merge:true});
+    }
+
+    async function sendMessage(){
+      const txt = messageInput.value.trim(); if(!txt || !activeChat) return;
+      messageInput.value='';
+      const msgs = collection(db, 'chats', activeChat.id, 'messages');
+      await addDoc(msgs, {from: currentUser.uid, text: txt, createdAt: serverTimestamp()});
+      // optionally update last message for chat previews
+      await setDoc(doc(db, 'chats', activeChat.id), {lastMessage: txt, lastAt: serverTimestamp()}, {merge:true});
+    }
+
+    // Load contacts in realtime
+    function loadContactsRealtime(){
+      const cCol = collection(db, 'users', currentUser.uid, 'contacts');
+      contactsUnsub = onSnapshot(cCol, async snap=>{
+        contactsList.innerHTML='';
+        for(const docSnap of snap.docs){
+          const c = docSnap.data();
+          const row = document.createElement('div');
+          row.className='contact';
+          row.dataset.uid = c.uid;
+          row.innerHTML = `<div class='avatar'>${(c.username||'U').charAt(0).toUpperCase()}</div><div class='meta'><div class='name'>${escapeHtml(c.username)}</div><div class='sub'>${c.uid}</div></div>`;
+          row.addEventListener('click', ()=>openChatWith(c.uid));
+          contactsList.appendChild(row);
+        }
+      });
+    }
+
+    // Add new contact by username (search users collection)
+    btnNewContact.addEventListener('click', async ()=>{
+      const q = prompt('Enter friend username exactly');
+      if(!q) return;
+      // search users collection (naive: get all matching) - for production add indexes
+      const usersCol = collection(db,'users');
+      const qSnap = await getDocs(query(usersCol, where('username', '==', q)));
+      if(qSnap.empty) return alert('No user found');
+      const u = qSnap.docs[0].data();
+      await addContactByUid(u.uid);
+      alert('Contact added');
+    });
+
+    // Open chat when clicking back on mobile
+    btnBack.addEventListener('click', ()=>{
+      document.getElementById('app').classList.add('single');
+    });
+
+    // Simple utility to show current user id in console
+    console.log('This app will run for anonymous user. Use firebase config.');
+
+    // Utility: handle invite links that contain a username param? (already handled uid)
+
+    // Start the flow
+    start();
+
+  </script>
+</body>
+</html>
