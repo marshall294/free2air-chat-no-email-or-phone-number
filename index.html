@@ -1,33 +1,9 @@
-<!--
-FirebaseTextChat.html
-Single-file text-only chat app (WhatsApp-like UI)
-Features:
-- Username-only sign-in (no email/phone)
-- Contacts list + invite link generation
-- Invite via link: ?invite=<uid> auto-adds contact
-- One-to-one chats with messages saved in Firestore (text only)
-- Message timestamps, simple "seen" indicator
-- Presence (online/offline) via Firebase Realtime Database
-- Typing indicator
-- Mobile-first responsive UI
-
-SETUP:
-1) Create a Firebase project and enable:
-   - Authentication > Anonymous sign-in
-   - Firestore (native mode)
-   - Realtime Database
-2) Replace the firebaseConfig below with your project config
-3) Deploy as static file or run locally (prefer https for invite links)
-
-Notes / Best practices included as inline comments.
--->
-
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Text Chat — Firebase (Username only)</title>
+  <title>Text Chat — (Username only, Avatars)</title>
   <style>
     /* Minimal mobile-first WhatsApp-like UI */
     :root{--bg:#f2f3f5;--primary:#075e54;--accent:#128c7e;--muted:#667;--bubble-self:#dcf8c6;--bubble-other:#fff}
@@ -38,15 +14,17 @@ Notes / Best practices included as inline comments.
     .sidebar{width:320px;max-width:45%;min-width:260px;background:#fff;border-right:1px solid #e6e6e6;display:flex;flex-direction:column}
     .brand{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid #eee}
     .brand .logo{width:44px;height:44px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--accent));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+    .profile-pic{width:44px;height:44px;border-radius:50%;background:#ddd;display:flex;align-items:center;justify-content:center;font-weight:700;overflow:hidden}
+    .profile-pic img{width:100%;height:100%;object-fit:cover;display:block}
     .search{padding:10px;border-bottom:1px solid #f1f1f1}
     .search input{width:100%;padding:10px;border-radius:8px;border:1px solid #eee}
     .contacts{overflow:auto;flex:1}
     .contact{display:flex;gap:10px;padding:12px;align-items:center;border-bottom:1px solid #fafafa;cursor:pointer}
     .contact:hover{background:#f9f9f9}
-    .avatar{width:44px;height:44px;border-radius:50%;background:#ddd;display:flex;align-items:center;justify-content:center;font-weight:700}
+    .avatar{width:44px;height:44px;border-radius:50%;background:#ddd;display:flex;align-items:center;justify-content:center;font-weight:700;overflow:hidden}
+    .avatar img{width:100%;height:100%;object-fit:cover;display:block}
     .contact .meta{flex:1}
     .contact .meta .name{font-weight:600}
-    .contact .meta .sub{font-size:12px;color:var(--muted)}
 
     /* Chat area */
     .chat{flex:1;display:flex;flex-direction:column;background:linear-gradient(180deg,#f8fbfb,#f2f3f5)}
@@ -72,6 +50,7 @@ Notes / Best practices included as inline comments.
     }
 
     .tiny{font-size:12px;color:var(--muted)}
+    .upload-btn{background:transparent;border:1px dashed #ddd;padding:6px;border-radius:8px;font-size:12px}
   </style>
 </head>
 <body>
@@ -79,7 +58,10 @@ Notes / Best practices included as inline comments.
 
     <div class="sidebar" id="sidebar">
       <div class="brand">
-        <div class="logo">TC</div>
+        <label class="profile-pic" id="myPicLabel" title="Click to change profile picture">
+          <img id="myPicImg" alt="profile">
+        </label>
+        <input id="picInput" type="file" accept="image/*" style="display:none">
         <div>
           <div style="font-weight:700">TextChat</div>
           <div class="tiny" id="myName">Not signed in</div>
@@ -134,14 +116,19 @@ Notes / Best practices included as inline comments.
     import { getAuth, signInAnonymously, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js';
     import { getFirestore, doc, setDoc, getDoc, collection, query, where, onSnapshot, addDoc, serverTimestamp, orderBy, limit, getDocs, updateDoc } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js';
     import { getDatabase, ref as dbRef, onDisconnect, onValue, set as rSet } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js';
+    import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'https://www.gstatic.com/firebasejs/9.23.0/firebase-storage.js';
 
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getFirestore(app);
     const rdb = getDatabase(app);
+    const storage = getStorage(app);
 
     // UI refs
     const myNameEl = document.getElementById('myName');
+    const myPicImg = document.getElementById('myPicImg');
+    const picInput = document.getElementById('picInput');
+    const myPicLabel = document.getElementById('myPicLabel');
     const contactsList = document.getElementById('contactsList');
     const btnNewContact = document.getElementById('btnNewContact');
     const btnInvite = document.getElementById('btnInvite');
@@ -177,6 +164,19 @@ Notes / Best practices included as inline comments.
       return uref;
     }
 
+    // Upload profile picture to Storage and save URL in user doc
+    async function uploadProfilePic(file){
+      if(!file) return;
+      const path = `profiles/${currentUser.uid}/avatar.jpg`;
+      const sRef = storageRef(storage, path);
+      await uploadBytes(sRef, file);
+      const url = await getDownloadURL(sRef);
+      // save to users doc
+      await setDoc(doc(db,'users',currentUser.uid), {photoURL: url, updatedAt: serverTimestamp()}, {merge:true});
+      // update local UI
+      myPicImg.src = url;
+    }
+
     // Sign-in anonymously then prompt for username if needed
     async function start(){
       await signInAnonymously(auth).catch(e=>console.error(e));
@@ -194,6 +194,13 @@ Notes / Best practices included as inline comments.
         currentUser.username = username;
         myNameEl.textContent = username;
         await ensureProfile(currentUser.uid, username);
+        // load user profile to get photoURL
+        const udoc = await getDoc(doc(db,'users',currentUser.uid));
+        if(udoc.exists()){
+          const data = udoc.data();
+          if(data.photoURL) myPicImg.src = data.photoURL;
+        }
+
         setupPresence();
         loadContactsRealtime();
         handleInviteOnLoad();
@@ -202,6 +209,19 @@ Notes / Best practices included as inline comments.
         currentUser = null;
         myNameEl.textContent = 'Not signed in';
       }
+    });
+
+    // Clicking avatar triggers file picker
+    myPicLabel.addEventListener('click', ()=> picInput.click());
+    picInput.addEventListener('change', async (e)=>{
+      const f = e.target.files[0];
+      if(!f) return;
+      // show preview immediately
+      const reader = new FileReader();
+      reader.onload = ()=>{ myPicImg.src = reader.result; };
+      reader.readAsDataURL(f);
+      // upload in background
+      await uploadProfilePic(f);
     });
 
     btnSignOut.addEventListener('click', async ()=>{
@@ -249,10 +269,16 @@ Notes / Best practices included as inline comments.
       const uDoc = await getDoc(doc(db,'users',uid));
       if(!uDoc.exists()) return alert('User not found');
       const udata = uDoc.data();
-      // add to current user's contacts collection
-      await setDoc(doc(db, 'users', currentUser.uid, 'contacts', uid), {uid: udata.uid, username: udata.username, addedAt: serverTimestamp()});
+      // add to current user's contacts collection (store name + photoURL only)
+      await setDoc(doc(db, 'users', currentUser.uid, 'contacts', uid), {uid: udata.uid, username: udata.username, photoURL: udata.photoURL || null, addedAt: serverTimestamp()});
       // add current user to other user's contacts if you want mutual
-      await setDoc(doc(db, 'users', uid, 'contacts', currentUser.uid), {uid: currentUser.uid, username: currentUser.username, addedAt: serverTimestamp()});
+      await setDoc(doc(db, 'users', uid, 'contacts', currentUser.uid), {uid: currentUser.uid, username: currentUser.username, photoURL: (await getMyPhotoURL()) || null, addedAt: serverTimestamp()});
+    }
+
+    async function getMyPhotoURL(){
+      const udoc = await getDoc(doc(db,'users',currentUser.uid));
+      if(!udoc.exists()) return null;
+      return udoc.data().photoURL || null;
     }
 
     // Create chat id deterministically for pair
@@ -268,7 +294,8 @@ Notes / Best practices included as inline comments.
       const udoc = await getDoc(doc(db,'users',uid));
       const udata = udoc.exists() ? udoc.data() : {username:uid};
       chatTitle.textContent = udata.username || uid;
-      chatAvatar.textContent = (udata.username||'U').charAt(0).toUpperCase();
+      // show avatar image if available
+      if(udata.photoURL) { chatAvatar.innerHTML = `<img src="${udata.photoURL}" alt="avatar">`; } else { chatAvatar.textContent = (udata.username||'U').charAt(0).toUpperCase(); }
 
       // listen to their presence
       const presenceRef = dbRef(rdb, '/status/' + uid);
@@ -345,7 +372,9 @@ Notes / Best practices included as inline comments.
           const row = document.createElement('div');
           row.className='contact';
           row.dataset.uid = c.uid;
-          row.innerHTML = `<div class='avatar'>${(c.username||'U').charAt(0).toUpperCase()}</div><div class='meta'><div class='name'>${escapeHtml(c.username)}</div><div class='sub'>${c.uid}</div></div>`;
+          // only show username and avatar (no uid)
+          const avatarHtml = c.photoURL ? `<div class='avatar'><img src='${c.photoURL}' alt='avatar'></div>` : `<div class='avatar'>${(c.username||'U').charAt(0).toUpperCase()}</div>`;
+          row.innerHTML = `${avatarHtml}<div class='meta'><div class='name'>${escapeHtml(c.username)}</div></div>`;
           row.addEventListener('click', ()=>openChatWith(c.uid));
           contactsList.appendChild(row);
         }
@@ -369,11 +398,6 @@ Notes / Best practices included as inline comments.
     btnBack.addEventListener('click', ()=>{
       document.getElementById('app').classList.add('single');
     });
-
-    // Simple utility to show current user id in console
-    console.log('This app will run for anonymous user. Use firebase config.');
-
-    // Utility: handle invite links that contain a username param? (already handled uid)
 
     // Start the flow
     start();
